@@ -3,142 +3,148 @@
 BeginPackage["Gillespie`"]
 
 
-fMakeReaction::usage="fMakeReaction makes a reaction dictionary, either unimolecular or 
-bimolecular. Inputs in order: name, rate, reactants, products. Products is a list of
-strings. For unimolecular reactions, reactant is a string; for bimolecular, reactants is a
-list of strings."
+makeReaction::usage="makeReaction makes a reaction dictionary, either unimolecular or 
+bimolecular. Inputs in order: name, rate, reactants, products. Reactions and products are lists of
+strings."
 
 
-fGillespie::usage="fGillespie runs the Gillespie algorithm. Inputs in order: tMax = max time.
-tStEvery = timestep to write counts. cDict0 = association of initial particle counts.
-uniRxnList = list of unimolecular reactions. biRxnList = list of bimolecular reactions.
-consLaws = association of strings to counts of species to conserve. Returns {times, 
-association of particle counts, association of reaction counts}."
+runGillespie::usage="runGillespie runs the Gillespie algorithm. Inputs in order: 
+tMax = max time. 
+countsInit = association of initial particle counts.
+rxnList = list of reactions. 
+conservedSpecies = list of species to conserve, else empty. 
+drWrite = If specified, write out at this timestep; if None, write only the times when reactions occur 
+or particle counts change
+Returns:
+association of species -> {times,particle counts}
+association of reactions -> {times,reaction counts}."
 
 
 Begin["Private`"]
 
 
-fMakeReaction[name_,kr_,r_,p_]:=Return[<|"name"->name,"kr"->kr,"r"->r,"p"->p|>];
+makeReaction[name_,kr_,r_,p_]:=Module[
+{rxn},
+	If[Length[r]==0&&Length[p]==0,
+		Print["Empty reactions are forbidden"];
+		Return[None];
+	];
+	If[Length[r]==0&&Length[p]!=1,
+		Print["Only 0->A is allowed, no further products."];
+		Return[None];
+	];
+	rxn=<|"name"->name,"kr"->kr,"r"->r,"p"->p|>;
+	rxn["species"]=DeleteDuplicates[Join[r,p]];
+	Return[rxn];
+];
 
 
-fGillespie[tMax_,tStEvery_,cDict0_,uniRxnList_,biRxnList_,consLaws_]:=Module[
-{t,cDictSt,cDict,tSt,props,rxns,propsCum,prop,rxnChoose,dt,rxnListC,rxnNew,rxnCount,rxnCountSt}
+runGillespie[tMax_,countsInit_,allRxnsList_,conservedSpecies_,dtWrite_:None]:=Module[
+{t,countsSt,countsCurrent,props,rxns,propsCum,prop,rxnChoose,dt,rxnNew,rxnCountSt,iStep,iStepNew,rxnCountsCurrent}
 ,
 (* Store counts *)
-cDictSt=Association[];
+countsSt=Association[];
 Do[
-If[!KeyExistsQ[consLaws,k],
-cDictSt[k]={cDict0[k]};
-];
-,{k,Keys[cDict0]}];
+	countsSt[k]={{0.0,countsInit[k]}};
+,{k,Keys[countsInit]}];
 
 (* Current counts *)
-cDict=cDict0;
-
-(* Write conservation for reagants into the reactions *)
-rxnListC={};
-Do[
-rxnNew=rxn;
-rxnNew["rC"]={};
-rxnNew["r"]={};
-Do[
-	If[KeyExistsQ[consLaws,r],
-		AppendTo[rxnNew["rC"],r],
-		AppendTo[rxnNew["r"],r]
-	];
-,{r,rxn["r"]}];
-
-(* Just throw out conserved products *)
-If[rxn["p"]!={},
-	rxnNew["p"]={};
-	Do[
-		If[!KeyExistsQ[consLaws,p],
-			AppendTo[rxnNew["p"],p]
-		];
-	,{p,rxn["p"]}];
-];
-AppendTo[rxnListC,rxnNew];
-,{rxn,Join[uniRxnList,biRxnList]}];
+countsCurrent = countsInit;
 
 (* Store reaction counts *)
-rxnCount=Association[];
 rxnCountSt=Association[];
+rxnCountsCurrent=Association[];
 Do[
-rxnCount[rxn["name"]]=0;
-rxnCountSt[rxn["name"]]={0};
-,{rxn,rxnListC}];
+	rxnCountSt[rxn["name"]]={{0.0,0}};
+	rxnCountsCurrent[rxn["name"]]=0;
+,{rxn,allRxnsList}];
 
-	(* Go over all time *)
+(* Go over all time *)
 t=0.0;
-tSt={t};
+iStep=0;
 Monitor[
-While[t<tMax,
-
-(* Propensities *)
-	props={};
-	rxns={};
-	propsCum=0.0;
-
-	(* Go through all possible reactions *)
-	Do[
-
-		(* Propensity *)
-prop=Product[cDict[r],{r,rxn["r"]}];
-prop*=Product[consLaws[r],{r,rxn["rC"]}];
-prop*=rxn["kr"];
+	While[t<tMax,
 
 		(* Propensities *)
-		propsCum+=prop;
-		AppendTo[props,prop];
-		AppendTo[rxns,rxn];
-	,{rxn,rxnListC}];
+		props={};
+		rxns={};
+		propsCum=0.0;
 
-If[Total[props]==0.0,
-(* No reactions left; finish *)
-		Break[];
-];
+		(* Go through all possible reactions *)
+		Do[
 
-	(* Choose a reaction *)
-	rxnChoose=RandomChoice[props->rxns];
+			(* Propensity *)
+			(* Note: if type 0\[Rule]A, make prop to A *)
+			If[Length[rxn["r"]]!=0,
+				prop=Product[countsCurrent[r],{r,rxn["r"]}],
+				prop=countsCurrent[rxn["p"][[1]]]
+			];
+			prop*=rxn["kr"];
 
-	(* Time of next reaction *)
-	dt=Log[1.0/RandomReal[{0,1}]]/propsCum;
+			(* Propensities *)
+			propsCum+=prop;
+			AppendTo[props,prop];
+			AppendTo[rxns,rxn];
+			
+		,{rxn,allRxnsList}];
 
-(* Check this time is still ok *)
-	If[t+dt>tMax,Break[]];
+		If[Total[props]==0.0,
+			(* No reactions left; finish *)
+			Break[];
+		];
 
-(* Check if we need to store *)
-If[IntegerPart[(t+dt)/tStEvery]==IntegerPart[t/tStEvery]+1,
-(* Store *)
-Do[
-AppendTo[cDictSt[c],cDict[c]];
-,{c,Keys[cDictSt]}];
-AppendTo[tSt,(IntegerPart[t/tStEvery]+1)*tStEvery];
-Do[
-AppendTo[rxnCountSt[rxn["name"]],rxnCount[rxn["name"]]];
-,{rxn,rxnListC}];
-];
+		(* Choose a reaction *)
+		rxnChoose=RandomChoice[props->rxns];
+		
+		(* Time of next reaction *)
+		dt=Log[1.0/RandomReal[{0,1}]]/propsCum;
 
-(* Advance time *)
-t+=dt; 
+		(* Check this time is still ok *)
+		If[t+dt>tMax,Break[]];
 
-(* Do the reaction *)
-Do[
-cDict[rs]-=1;
-,{rs,rxnChoose["r"]}];
-Do[
-cDict[ps]+=1;
-,{ps,rxnChoose["p"]}];
+		(* Advance time *)
+		t+=dt; 
+		If[dtWrite=!=None,
+			iStepNew = IntegerPart[t/dtWrite];
+			If[iStepNew!=iStep,
+				(* Write *)
+				Do[
+					Do[
+						AppendTo[countsSt[species],{iStepWrite*dtWrite,countsCurrent[species]}];
+					,{species,Keys[countsSt]}];
+					Do[
+						AppendTo[rxnCountSt[rxn],{iStepWrite*dtWrite,rxnCountsCurrent[rxn]}];
+					,{rxn,Keys[rxnCountsCurrent]}];
+				,{iStepWrite,iStep+1,iStepNew}];
+				(* Advance *)
+				iStep=iStepNew;
+			];
+		];
 
-(* Count it *)
-rxnCount[rxnChoose["name"]]+=1;
-];
-,
-ProgressIndicator[t,{0,tMax}]
-];
+		(* Do the reaction *)
+		rxnCountsCurrent[rxnChoose["name"]]+=1;
+		Do[
+			If[!MemberQ[conservedSpecies,rs],
+				countsCurrent[rs]-=1;
+			];
+		,{rs,rxnChoose["r"]}];
+		Do[
+			If[!MemberQ[conservedSpecies,ps],
+				countsCurrent[ps]+=1;
+			];
+		,{ps,rxnChoose["p"]}];
+		
+		(* Store counts at the exact times *)
+		If[dtWrite===None,
+			Do[
+				AppendTo[countsSt[species],{t,countsCurrent[species]}];
+			,{species,rxnChoose["species"]}];
+			AppendTo[rxnCountSt[rxnChoose["name"]],{t,rxnCountsCurrent[rxnChoose["name"]]}];
+		];
+	];
+,ProgressIndicator[t,{0,tMax}]];
 
-Return[{tSt,cDictSt,rxnCountSt}];
+Return[{countsSt,rxnCountSt}];
 ]
 
 
